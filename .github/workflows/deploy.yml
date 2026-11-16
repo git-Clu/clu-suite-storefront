@@ -1,0 +1,45 @@
+# Push to main → test, build, deploy to portal.clu.gr through `clu-app ship`.
+# The server side is ops/clu-app.sh installed as /usr/local/sbin/clu-app; see ops/README.md in Clu.gr/clu.
+# CI authenticates with a deploy key whose authorized_keys line is:
+#   command="/usr/local/sbin/clu-app",restrict ssh-ed25519 AAAA... storefront-ci
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
+  workflow_dispatch:
+
+concurrency:
+  group: portal
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Fail here, before anything reaches the server.
+      - name: Test and build
+        run: npm ci && npm test && npm run build
+
+      - name: Set up SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # clu-app reads deploy/app.conf from the tarball, runs BUILD (which migrates), switches the
+      # release, health-checks it and rolls back automatically if it fails.
+      - name: Ship
+        run: git archive --format=tar.gz HEAD | ssh root@${{ vars.DEPLOY_HOST }} 'ship clu-portal "$(git rev-parse --short HEAD)"'
